@@ -127,6 +127,8 @@ func main() {
 			Vars:           vars,
 			VarsCount:      len(vars),
 			IncludeURLVars: includeURLVars,
+			debug_found_api_logic: true,
+			debug_api_raw_has_extra: true
 		}
 		payload["schema"] = buildSchema(vars)
 
