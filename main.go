@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"bytes"
 )
 
 // Input represents the Corezoid event JSON
@@ -454,21 +455,52 @@ func main() {
 	}
 
 	// Parse input
-	var input Input
-	if err := json.Unmarshal(inputBytes, &input); err != nil {
-		output := Output{
-			Data: OutputData{
-				Error: &ErrorInfo{
-					Message: "Invalid input JSON: " + err.Error(),
-					Code:    "BAD_INPUT",
-				},
-				AdditionalFields: make(map[string]interface{}),
+	// Trim check: empty stdin
+trimmed := inputBytes
+// простий trim без bytes.TrimSpace (щоб не тягнути імпорти) — ок, але краще bytes.TrimSpace:
+trimmed = bytes.TrimSpace(trimmed)
+
+if len(trimmed) == 0 {
+	output := Output{
+		Data: OutputData{
+			Error: &ErrorInfo{
+				Message: "Empty stdin: no JSON received by git call",
+				Code:    "BAD_INPUT",
 			},
-		}
-		outputJSON, _ := json.Marshal(output)
-		fmt.Println(string(outputJSON))
-		os.Exit(0)
+			AdditionalFields: map[string]interface{}{
+				"input_len": 0,
+			},
+		},
 	}
+	outputJSON, _ := json.Marshal(output)
+	fmt.Println(string(outputJSON))
+	return
+}
+
+// Parse input
+var input Input
+if err := json.Unmarshal(trimmed, &input); err != nil {
+	preview := string(trimmed)
+	if len(preview) > 300 {
+		preview = preview[:300]
+	}
+	output := Output{
+		Data: OutputData{
+			Error: &ErrorInfo{
+				Message: "Invalid input JSON: " + err.Error(),
+				Code:    "BAD_INPUT",
+			},
+			AdditionalFields: map[string]interface{}{
+				"input_len":     len(trimmed),
+				"input_preview": preview,
+			},
+		},
+	}
+	outputJSON, _ := json.Marshal(output)
+	fmt.Println(string(outputJSON))
+	return
+}
+
 
 	// Process the event
 	outputData := processEvent(input.Data)
