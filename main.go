@@ -191,13 +191,31 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 	return ai, nil
 }
 
-func extractVarsFromNextNode(next *Node, excludeURL bool) []string {
+func extractVarsFromNextNode(next *Node, excludeURL bool) (vars []string, foundAPI bool, hasExtra bool, rawKeys []string) {
 	for _, lg := range next.allLogics() {
 		if isAPILogic(lg.Type) {
-			return extractVariablesFromObject(lg.Raw, excludeURL)
+			foundAPI = true
+
+			// keys для дебагу
+			for k := range lg.Raw {
+				rawKeys = append(rawKeys, k)
+			}
+			sort.Strings(rawKeys)
+
+			// чи є extra
+			if _, ok := lg.Raw["extra"]; ok {
+				hasExtra = true
+			}
+
+			vars = extractVariablesFromObject(lg.Raw, excludeURL)
+			if vars == nil {
+				vars = []string{}
+			}
+			return
 		}
 	}
-	return nil
+
+	return []string{}, false, false, nil
 }
 
 func isAPILogic(t string) bool {
