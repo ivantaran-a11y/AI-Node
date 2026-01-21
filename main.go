@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"sort"
 	"strings"
-    "github.com/corezoid/gitcall-go-runner/gitcall"
+
+	"github.com/corezoid/gitcall-go-runner/gitcall"
 )
 
 type ProcessData struct {
@@ -19,12 +19,10 @@ type Scheme struct {
 }
 
 type Node struct {
-	ID      string  `json:"id"`
-	Title   string  `json:"title,omitempty"`
-	ObjType int     `json:"obj_type,omitempty"`
-	Logics  []Logic `json:"logics,omitempty"`
-
-	// інший можливий формат (якщо десь прилетить)
+	ID        string     `json:"id"`
+	Title     string     `json:"title,omitempty"`
+	ObjType   int        `json:"obj_type,omitempty"`
+	Logics    []Logic    `json:"logics,omitempty"`
 	Condition *Condition `json:"condition,omitempty"`
 }
 
@@ -54,7 +52,6 @@ func (l *Logic) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	l.Raw = raw
-
 	if v, ok := raw["type"].(string); ok {
 		l.Type = v
 	}
@@ -75,35 +72,28 @@ type Meta struct {
 	NextNodeTitle  string   `json:"next_node_title,omitempty"`
 	Vars           []string `json:"vars"`
 	VarsCount      int      `json:"vars_count"`
-	IncludeURLVars bool     `json:"include_url_vars"`
-
-	DebugFoundAPILogic  bool     `json:"debug_found_api_logic,omitempty"`
-	DebugAPIRawHasExtra bool     `json:"debug_api_raw_has_extra,omitempty"`
-	DebugAPIRawKeys     []string `json:"debug_api_raw_keys,omitempty"`
+	IncludeURLVars bool     `json:"include_url_vars"` // лишаємо, але тут не використовується
 }
-
 
 func main() {
 	gitcall.Handle(func(_ context.Context, data map[string]interface{}) error {
-		// Підтримка двох форматів: root.* або data.*
+		// зчитуємо або з root, або з data.*
 		payload := data
 		if d, ok := data["data"].(map[string]interface{}); ok {
-			// якщо користувач кладе все в data.*
 			if _, hasProc := d["process"]; hasProc {
 				payload = d
 			}
 		}
 
 		aiNodeID, _ := payload["aiNodeId"].(string)
-		includeURLVars, _ := payload["includeUrlVars"].(bool)
+		procObj := payload["process"]
 
-		procObj, ok := payload["process"]
-		if !ok || procObj == nil {
-			payload["error"] = ErrorInfo{Code: "BAD_INPUT", Message: "process is required"}
-			return nil
-		}
 		if aiNodeID == "" {
 			payload["error"] = ErrorInfo{Code: "BAD_INPUT", Message: "aiNodeId is required"}
+			return nil
+		}
+		if procObj == nil {
+			payload["error"] = ErrorInfo{Code: "BAD_INPUT", Message: "process is required"}
 			return nil
 		}
 
@@ -114,38 +104,48 @@ func main() {
 		}
 
 		aiNode, nextNode := findAiAndNext(procBytes, aiNodeID)
-
 		if aiNode == nil {
 			payload["error"] = ErrorInfo{Code: "AI_NODE_NOT_FOUND", Message: "AI node not found by id: " + aiNodeID}
 			return nil
 		}
 
+		// дефолтна схема (порожні properties)
+		schema := map[string]interface{}{
+			"$schema":              "https://json-schema.org/draft/2020-12/schema",
+			"name":                 "structured_output",
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties":           map[string]interface{}{},
+		}
 		vars := []string{}
-foundAPI := false
-hasExtra := false
-rawKeys := []string(nil)
 
-if nextNode != nil {
-	vars, foundAPI, hasExtra, rawKeys = extractVarsFromNextNode(nextNode, !includeURLVars)
-}
+		if nextNode != nil {
+			for _, lg := range nextNode.allLogics() {
+				if strings.ToLower(lg.Type) == "api" {
+					s, req := buildStructuredOutputSchemaFromExtra(lg.Raw)
+					schema = s
+					vars = req
+					break
+				}
+			}
+		}
 
+		payload["meta"] = Meta{
+			AINodeID:       aiNodeID,
+			NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
+			NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
+			Vars:           vars,
+			VarsCount:      len(vars),
+			IncludeURLVars: false,
+		}
 
-	payload["meta"] = Meta{
-    AINodeID:       aiNodeID,
-    NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
-    NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
-    Vars:           vars,
-    VarsCount:      len(vars),
-    IncludeURLVars: includeURLVars,
+		payload["structured_output_rsp"] = map[string]interface{}{
+			"status": "ok",
+			"schema": schema,
+		}
 
-    DebugFoundAPILogic:  foundAPI,
-    DebugAPIRawHasExtra: hasExtra,
-    DebugAPIRawKeys:     rawKeys,
-}
-
-		payload["schema"] = buildSchema(vars)
-
-		// якщо все ок — прибираємо попередні помилки (якщо були)
+		// якщо раніше було поле schema — прибираємо, щоб не плутало
+		delete(payload, "schema")
 		delete(payload, "error")
 		return nil
 	})
@@ -154,7 +154,13 @@ if nextNode != nil {
 func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 	var p ProcessData
 	if err := json.Unmarshal(procBytes, &p); err != nil {
-		return nil, nil
+		// fallback: process може бути масивом
+		var arr []ProcessData
+		if err2 := json.Unmarshal(procBytes, &arr); err2 == nil && len(arr) > 0 {
+			p = arr[0]
+		} else {
+			return nil, nil
+		}
 	}
 
 	nodes := p.Nodes
@@ -196,101 +202,57 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 	return ai, nil
 }
 
-func extractVarsFromNextNode(next *Node, excludeURL bool) (vars []string, foundAPI bool, hasExtra bool, rawKeys []string) {
-	for _, lg := range next.allLogics() {
-		if isAPILogic(lg.Type) {
-			foundAPI = true
+func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[string]interface{}, []string) {
+	props := map[string]interface{}{}
+	required := []string{}
 
-			// keys для дебагу
-			for k := range lg.Raw {
-				rawKeys = append(rawKeys, k)
-			}
-			sort.Strings(rawKeys)
+	extra, _ := raw["extra"].(map[string]interface{})
+	extraType, _ := raw["extra_type"].(map[string]interface{})
 
-			// чи є extra
-			if _, ok := lg.Raw["extra"]; ok {
-				hasExtra = true
-			}
-
-			vars = extractVariablesFromObject(lg.Raw, excludeURL)
-			if vars == nil {
-				vars = []string{}
-			}
-			return
-		}
-	}
-
-	return []string{}, false, false, nil
-}
-
-func isAPILogic(t string) bool {
-	t = strings.ToLower(t)
-	return t == "api" || t == "api_call" || strings.Contains(t, "api")
-}
-
-func buildSchema(vars []string) map[string]interface{} {
-	props := map[string]interface{}{
-		"result": map[string]interface{}{"type": "string", "description": "Результат/рішення агента"},
-		"reason": map[string]interface{}{"type": "string", "description": "Коротке пояснення"},
-	}
-	required := []string{"result", "reason"}
-
-	for _, v := range vars {
-		props[v] = map[string]interface{}{"type": "string"}
-		required = append(required, v)
-	}
-
-	return map[string]interface{}{
-		"type":       "object",
-		"properties": props,
-		"required":   required,
-	}
-}
-
-func extractVariablesFromString(s string) []string {
-	re := regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
-	m := re.FindAllStringSubmatch(s, -1)
-	out := make([]string, 0, len(m))
-	for _, mm := range m {
-		if len(mm) > 1 {
-			out = append(out, mm[1])
-		}
-	}
-	return out
-}
-
-func extractVariablesFromObject(obj interface{}, excludeURL bool) []string {
-	set := map[string]bool{}
-
-	var walk func(v interface{})
-	walk = func(v interface{}) {
-		switch x := v.(type) {
-		case string:
-			for _, name := range extractVariablesFromString(x) {
-				set[name] = true
-			}
-		case map[string]interface{}:
-			for k, vv := range x {
-				if excludeURL && k == "url" {
-					continue
-				}
-				walk(vv)
-			}
-		case []interface{}:
-			for _, it := range x {
-				walk(it)
+	for key := range extra {
+		t := ""
+		if extraType != nil {
+			if ts, ok := extraType[key].(string); ok {
+				t = strings.ToLower(ts)
 			}
 		}
+		props[key] = jsonSchemaForType(t)
+		required = append(required, key)
 	}
 
-	walk(obj)
+	sort.Strings(required)
 
-	var vars []string
-	for k := range set {
-		vars = append(vars, k)
+	schema := map[string]interface{}{
+		"$schema":              "https://json-schema.org/draft/2020-12/schema",
+		"name":                 "structured_output",
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           props,
 	}
-	sort.Strings(vars)
-	return vars
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+
+	return schema, required
+}
+
+func jsonSchemaForType(t string) map[string]interface{} {
+	switch t {
+	case "string":
+		return map[string]interface{}{"type": "string"}
+	case "array":
+		return map[string]interface{}{"type": "array", "items": map[string]interface{}{}}
+	case "object":
+		return map[string]interface{}{"type": "object", "additionalProperties": true}
+	case "integer":
+		return map[string]interface{}{"type": "integer"}
+	case "number":
+		return map[string]interface{}{"type": "number"}
+	case "boolean":
+		return map[string]interface{}{"type": "boolean"}
+	default:
+		return map[string]interface{}{"type": "string"}
+	}
 }
 
 func safe[T any](p *T, f func(*T) string) string {
