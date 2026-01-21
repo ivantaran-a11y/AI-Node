@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
     "github.com/corezoid/gitcall-go-runner/gitcall"
-	"github.com/invopop/jsonschema"
 )
 
 type ProcessData struct {
