@@ -7,7 +7,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strings"
 )
 
 // Input represents the Corezoid event JSON
