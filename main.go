@@ -122,7 +122,7 @@ func main() {
 		if nextNode != nil {
 			for _, lg := range nextNode.allLogics() {
 				if strings.ToLower(lg.Type) == "api" {
-					s, req := buildStructuredOutputSchemaFromExtra(lg.Raw)
+					s, req := buildStructuredOutputSchemaFromExtraAndURL(lg.Raw)
 					schema = s
 					vars = req
 					break
@@ -202,10 +202,19 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 	return ai, nil
 }
 
-func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[string]interface{}, []string) {
+func buildStructuredOutputSchemaFromExtraAndURL(raw map[string]interface{}) (map[string]interface{}, []string) {
 	props := map[string]interface{}{}
 	requiredSet := map[string]bool{}
 
+	// 1) URL vars (default string)
+	if urlVal, ok := raw["url"].(string); ok {
+		for _, varName := range extractVariablesFromString(urlVal) {
+			props[varName] = map[string]interface{}{"type": "string"}
+			requiredSet[varName] = true
+		}
+	}
+
+	// 2) EXTRA vars (names from values, types from extra_type by key)
 	extra, _ := raw["extra"].(map[string]interface{})
 	extraType, _ := raw["extra_type"].(map[string]interface{})
 
@@ -219,15 +228,12 @@ func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[strin
 		}
 		propSchema := jsonSchemaForType(t)
 
-		// беремо змінні зі значення, напр. "{{actorsList}}"
 		s, ok := val.(string)
 		if !ok {
 			continue
 		}
 
-		varNames := extractVariablesFromString(s) // повертає []string з плейсхолдерів
-		for _, varName := range varNames {
-			// varName = "id" або "actorsList"
+		for _, varName := range extractVariablesFromString(s) {
 			props[varName] = propSchema
 			requiredSet[varName] = true
 		}
@@ -252,6 +258,7 @@ func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[strin
 
 	return schema, required
 }
+
 
 func extractVariablesFromString(s string) []string {
 	re := regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
