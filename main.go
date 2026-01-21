@@ -196,9 +196,9 @@ func (l *Logic) UnmarshalJSON(data []byte) error {
 
 	l.RawData = raw
 
-	if v, ok := raw["type"]; ok {
-		l.Type = v.(string)
-	}
+	if v, ok := raw["type"].(string); ok {
+    l.Type = v
+}
 	if v, ok := raw["to_node_id"]; ok {
 		l.ToNodeID = v.(string)
 	}
