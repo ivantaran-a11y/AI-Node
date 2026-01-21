@@ -76,7 +76,12 @@ type Meta struct {
 	Vars           []string `json:"vars"`
 	VarsCount      int      `json:"vars_count"`
 	IncludeURLVars bool     `json:"include_url_vars"`
+
+	DebugFoundAPILogic  bool     `json:"debug_found_api_logic,omitempty"`
+	DebugAPIRawHasExtra bool     `json:"debug_api_raw_has_extra,omitempty"`
+	DebugAPIRawKeys     []string `json:"debug_api_raw_keys,omitempty"`
 }
+
 
 func main() {
 	gitcall.Handle(func(_ context.Context, data map[string]interface{}) error {
@@ -120,16 +125,19 @@ func main() {
 			vars = extractVarsFromNextNode(nextNode, !includeURLVars)
 		}
 
-		payload["meta"] = Meta{
-			AINodeID:       aiNodeID,
-			NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
-			NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
-			Vars:           vars,
-			VarsCount:      len(vars),
-			IncludeURLVars: includeURLVars,
-			debug_found_api_logic: true,
-			debug_api_raw_has_extra: true
-		}
+	payload["meta"] = Meta{
+	AINodeID:       aiNodeID,
+	NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
+	NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
+	Vars:           vars,
+	VarsCount:      len(vars),
+	IncludeURLVars: includeURLVars,
+
+	DebugFoundAPILogic:  foundAPI,
+	DebugAPIRawHasExtra: hasExtra,
+	DebugAPIRawKeys:     rawKeys,
+}
+
 		payload["schema"] = buildSchema(vars)
 
 		// якщо все ок — прибираємо попередні помилки (якщо були)
