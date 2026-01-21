@@ -1,0 +1,85 @@
+{
+  "scheme": {
+    "nodes": [
+      {
+        "id": "start_node",
+        "obj_type": 1,
+        "title": "Start",
+        "condition": {
+          "logics": [
+            {
+              "type": "go",
+              "to_node_id": "ai_node"
+            }
+          ],
+          "semaphors": []
+        }
+      },
+      {
+        "id": "ai_node",
+        "obj_type": 0,
+        "title": "AI Node",
+        "condition": {
+          "logics": [
+            {
+              "type": "go",
+              "to_node_id": "api_node"
+            }
+          ],
+          "semaphors": []
+        }
+      },
+      {
+        "id": "api_node",
+        "obj_type": 0,
+        "title": "API Call",
+        "condition": {
+          "logics": [
+            {
+              "type": "api",
+              "rfc_format": true,
+              "format": "",
+              "content_type": "application/json",
+              "method": "POST",
+              "url": "{{baseUrl}}/api/users",
+              "extra": {
+                "id": "{{userId}}",
+                "list": "{{actorsList}}"
+              },
+              "extra_type": {
+                "id": "string",
+                "list": "array"
+              },
+              "extra_headers": {
+                "content-type": "application/json; charset=utf-8"
+              },
+              "cert_pem": "",
+              "max_threads": 5,
+              "send_sys": true,
+              "debug_info": false,
+              "customize_response": false,
+              "response": {
+                "header": "{{header}}",
+                "body": "{{body}}"
+              },
+              "response_type": {
+                "header": "object",
+                "body": "object"
+              }
+            }
+          ],
+          "semaphors": []
+        }
+      },
+      {
+        "id": "end_node",
+        "obj_type": 2,
+        "title": "Final",
+        "condition": {
+          "logics": [],
+          "semaphors": []
+        }
+      }
+    ]
+  }
+}
