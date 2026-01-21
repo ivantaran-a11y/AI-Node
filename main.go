@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
-
+	"regexp"
 	"github.com/corezoid/gitcall-go-runner/gitcall"
 )
 
@@ -204,22 +204,39 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 
 func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[string]interface{}, []string) {
 	props := map[string]interface{}{}
-	required := []string{}
+	requiredSet := map[string]bool{}
 
 	extra, _ := raw["extra"].(map[string]interface{})
 	extraType, _ := raw["extra_type"].(map[string]interface{})
 
-	for key := range extra {
+	for key, val := range extra {
+		// тип беремо з extra_type[key]
 		t := ""
 		if extraType != nil {
 			if ts, ok := extraType[key].(string); ok {
 				t = strings.ToLower(ts)
 			}
 		}
-		props[key] = jsonSchemaForType(t)
-		required = append(required, key)
+		propSchema := jsonSchemaForType(t)
+
+		// беремо змінні зі значення, напр. "{{actorsList}}"
+		s, ok := val.(string)
+		if !ok {
+			continue
+		}
+
+		varNames := extractVariablesFromString(s) // повертає []string з плейсхолдерів
+		for _, varName := range varNames {
+			// varName = "id" або "actorsList"
+			props[varName] = propSchema
+			requiredSet[varName] = true
+		}
 	}
 
+	required := make([]string, 0, len(requiredSet))
+	for v := range requiredSet {
+		required = append(required, v)
+	}
 	sort.Strings(required)
 
 	schema := map[string]interface{}{
@@ -235,6 +252,19 @@ func buildStructuredOutputSchemaFromExtra(raw map[string]interface{}) (map[strin
 
 	return schema, required
 }
+
+func extractVariablesFromString(s string) []string {
+	re := regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
+	m := re.FindAllStringSubmatch(s, -1)
+	out := make([]string, 0, len(m))
+	for _, mm := range m {
+		if len(mm) > 1 {
+			out = append(out, mm[1])
+		}
+	}
+	return out
+}
+
 
 func jsonSchemaForType(t string) map[string]interface{} {
 	switch t {
