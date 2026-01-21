@@ -121,21 +121,26 @@ func main() {
 		}
 
 		vars := []string{}
-		if nextNode != nil {
-			vars = extractVarsFromNextNode(nextNode, !includeURLVars)
-		}
+foundAPI := false
+hasExtra := false
+rawKeys := []string(nil)
+
+if nextNode != nil {
+	vars, foundAPI, hasExtra, rawKeys = extractVarsFromNextNode(nextNode, !includeURLVars)
+}
+
 
 	payload["meta"] = Meta{
-	AINodeID:       aiNodeID,
-	NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
-	NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
-	Vars:           vars,
-	VarsCount:      len(vars),
-	IncludeURLVars: includeURLVars,
+    AINodeID:       aiNodeID,
+    NextNodeID:     safe(nextNode, func(n *Node) string { return n.ID }),
+    NextNodeTitle:  safe(nextNode, func(n *Node) string { return n.Title }),
+    Vars:           vars,
+    VarsCount:      len(vars),
+    IncludeURLVars: includeURLVars,
 
-	DebugFoundAPILogic:  foundAPI,
-	DebugAPIRawHasExtra: hasExtra,
-	DebugAPIRawKeys:     rawKeys,
+    DebugFoundAPILogic:  foundAPI,
+    DebugAPIRawHasExtra: hasExtra,
+    DebugAPIRawKeys:     rawKeys,
 }
 
 		payload["schema"] = buildSchema(vars)
