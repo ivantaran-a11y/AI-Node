@@ -416,6 +416,13 @@ func jsonSchemaForType(t string) map[string]interface{} {
 }
 
 func safe[T any](p *T, f func(*T) string) string {
+
+	if c, ok := payload["content"].(map[string]interface{}); ok {
+    if props, ok2 := c["properties"].(map[string]interface{}); ok2 {
+        payload["content"] = props
+    }
+}
+
 	if p == nil {
 		return ""
 	}
