@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strings"
-	"regexp"
+
 	"github.com/corezoid/gitcall-go-runner/gitcall"
 )
 
@@ -27,9 +28,11 @@ type Node struct {
 }
 
 type Condition struct {
-	Logics []Logic `json:"logics,omitempty"`
+	Logics    []Logic `json:"logics,omitempty"`
+	Semaphors []Logic `json:"semaphors,omitempty"` // <-- додали
 }
 
+// Логіки з node.logics або node.condition.logics
 func (n Node) allLogics() []Logic {
 	if len(n.Logics) > 0 {
 		return n.Logics
@@ -38,6 +41,19 @@ func (n Node) allLogics() []Logic {
 		return n.Condition.Logics
 	}
 	return nil
+}
+
+// Переходи для графа: logics + semaphors
+func (n Node) allTransitions() []Logic {
+	out := []Logic{}
+	out = append(out, n.allLogics()...)
+	if n.Condition != nil && len(n.Condition.Semaphors) > 0 {
+		out = append(out, n.Condition.Semaphors...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type Logic struct {
@@ -72,7 +88,7 @@ type Meta struct {
 	NextNodeTitle  string   `json:"next_node_title,omitempty"`
 	Vars           []string `json:"vars"`
 	VarsCount      int      `json:"vars_count"`
-	IncludeURLVars bool     `json:"include_url_vars"` // лишаємо, але тут не використовується
+	IncludeURLVars bool     `json:"include_url_vars"`
 }
 
 func main() {
@@ -103,7 +119,13 @@ func main() {
 			return nil
 		}
 
-		aiNode, nextNode := findAiAndNext(procBytes, aiNodeID)
+		nodes := parseNodes(procBytes)
+		if len(nodes) == 0 {
+			payload["error"] = ErrorInfo{Code: "BAD_INPUT", Message: "process.scheme.nodes (or nodes) is empty"}
+			return nil
+		}
+
+		aiNode, startID := findAiNodeAndStart(nodes, aiNodeID)
 		if aiNode == nil {
 			payload["error"] = ErrorInfo{Code: "AI_NODE_NOT_FOUND", Message: "AI node not found by id: " + aiNodeID}
 			return nil
@@ -119,14 +141,15 @@ func main() {
 		}
 		vars := []string{}
 
-		if nextNode != nil {
-			for _, lg := range nextNode.allLogics() {
-				if strings.ToLower(lg.Type) == "api" {
-					s, req := buildStructuredOutputSchemaFromExtraAndURL(lg.Raw)
-					schema = s
-					vars = req
-					break
-				}
+		var nextNode *Node
+		if startID != "" {
+			props, required, next := buildSchemaFromReachable(nodes, startID)
+			nextNode = next
+
+			if len(required) > 0 {
+				schema["properties"] = props
+				schema["required"] = required
+				vars = required
 			}
 		}
 
@@ -144,14 +167,13 @@ func main() {
 			"schema": schema,
 		}
 
-		// якщо раніше було поле schema — прибираємо, щоб не плутало
 		delete(payload, "schema")
 		delete(payload, "error")
 		return nil
 	})
 }
 
-func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
+func parseNodes(procBytes []byte) []Node {
 	var p ProcessData
 	if err := json.Unmarshal(procBytes, &p); err != nil {
 		// fallback: process може бути масивом
@@ -159,7 +181,7 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 		if err2 := json.Unmarshal(procBytes, &arr); err2 == nil && len(arr) > 0 {
 			p = arr[0]
 		} else {
-			return nil, nil
+			return nil
 		}
 	}
 
@@ -167,10 +189,11 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 	if len(nodes) == 0 && p.Scheme != nil {
 		nodes = p.Scheme.Nodes
 	}
-	if len(nodes) == 0 {
-		return nil, nil
-	}
+	return nodes
+}
 
+// Повертаємо AI node та startID = перший unconditional go з AI node
+func findAiNodeAndStart(nodes []Node, aiNodeID string) (*Node, string) {
 	var ai *Node
 	for i := range nodes {
 		if nodes[i].ID == aiNodeID {
@@ -179,63 +202,61 @@ func findAiAndNext(procBytes []byte, aiNodeID string) (*Node, *Node) {
 		}
 	}
 	if ai == nil {
-		return nil, nil
+		return nil, ""
 	}
 
-	// next node по першому unconditional go
-	var nextID string
-	for _, lg := range ai.allLogics() {
+	var startID string
+	for _, lg := range ai.allTransitions() {
 		if lg.Type == "go" && lg.ToNodeID != "" {
-			nextID = lg.ToNodeID
+			startID = lg.ToNodeID
 			break
 		}
 	}
-	if nextID == "" {
-		return ai, nil
-	}
-
-	for i := range nodes {
-		if nodes[i].ID == nextID {
-			return ai, &nodes[i]
-		}
-	}
-	return ai, nil
+	return ai, startID
 }
 
-func buildStructuredOutputSchemaFromExtraAndURL(raw map[string]interface{}) (map[string]interface{}, []string) {
+// === ГОЛОВНЕ: збір змінних з усіх досяжних вузлів ===
+
+func buildSchemaFromReachable(nodes []Node, startID string) (map[string]interface{}, []string, *Node) {
+	id2node := map[string]*Node{}
+	for i := range nodes {
+		id2node[nodes[i].ID] = &nodes[i]
+	}
+
+	visited := map[string]bool{}
+	queue := []string{startID}
+
+	// properties[var] = json-schema
 	props := map[string]interface{}{}
 	requiredSet := map[string]bool{}
 
-	// 1) URL vars (default string)
-	if urlVal, ok := raw["url"].(string); ok {
-		for _, varName := range extractVariablesFromString(urlVal) {
-			props[varName] = map[string]interface{}{"type": "string"}
-			requiredSet[varName] = true
-		}
+	var firstNode *Node
+	if n, ok := id2node[startID]; ok {
+		firstNode = n
 	}
 
-	// 2) EXTRA vars (names from values, types from extra_type by key)
-	extra, _ := raw["extra"].(map[string]interface{})
-	extraType, _ := raw["extra_type"].(map[string]interface{})
+	for len(queue) > 0 {
+		curID := queue[0]
+		queue = queue[1:]
 
-	for key, val := range extra {
-		// тип беремо з extra_type[key]
-		t := ""
-		if extraType != nil {
-			if ts, ok := extraType[key].(string); ok {
-				t = strings.ToLower(ts)
-			}
+		if visited[curID] {
+			continue
 		}
-		propSchema := jsonSchemaForType(t)
+		visited[curID] = true
 
-		s, ok := val.(string)
-		if !ok {
+		n, ok := id2node[curID]
+		if !ok || n == nil {
 			continue
 		}
 
-		for _, varName := range extractVariablesFromString(s) {
-			props[varName] = propSchema
-			requiredSet[varName] = true
+		// збираємо vars з усіх transitions (logics+semaphors) цього node
+		for _, tr := range n.allTransitions() {
+			collectVarsFromLogicRaw(tr.Raw, props, requiredSet)
+
+			// будуємо граф за будь-якими to_node_id (go / go_if_* / time / ...)
+			if tr.ToNodeID != "" && !visited[tr.ToNodeID] {
+				queue = append(queue, tr.ToNodeID)
+			}
 		}
 	}
 
@@ -245,33 +266,135 @@ func buildStructuredOutputSchemaFromExtraAndURL(raw map[string]interface{}) (map
 	}
 	sort.Strings(required)
 
-	schema := map[string]interface{}{
-		"$schema":              "https://json-schema.org/draft/2020-12/schema",
-		"name":                 "structured_output",
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties":           props,
-	}
-	if len(required) > 0 {
-		schema["required"] = required
-	}
-
-	return schema, required
+	return props, required, firstNode
 }
 
+func collectVarsFromLogicRaw(raw map[string]interface{}, props map[string]interface{}, requiredSet map[string]bool) {
+	if raw == nil {
+		return
+	}
+
+	// 1) url
+	if urlVal, ok := raw["url"].(string); ok {
+		for _, v := range extractVariablesFromString(urlVal) {
+			addVar(props, requiredSet, v, jsonSchemaForType("string"))
+		}
+	}
+
+	// 2) extra_headers (наприклад Authorization: Bearer {{token}})
+	if hdrs, ok := raw["extra_headers"].(map[string]interface{}); ok {
+		for _, val := range hdrs {
+			if s, ok := val.(string); ok {
+				for _, v := range extractVariablesFromString(s) {
+					addVar(props, requiredSet, v, jsonSchemaForType("string"))
+				}
+			}
+		}
+	}
+
+	// 3) extra з типізацією через extra_type
+	extra, _ := raw["extra"].(map[string]interface{})
+	extraType, _ := raw["extra_type"].(map[string]interface{})
+	for key, val := range extra {
+		s, ok := val.(string)
+		if !ok {
+			continue
+		}
+		t := ""
+		if extraType != nil {
+			if ts, ok := extraType[key].(string); ok {
+				t = strings.ToLower(ts)
+			}
+		}
+		propSchema := jsonSchemaForType(t)
+
+		for _, v := range extractVariablesFromString(s) {
+			addVar(props, requiredSet, v, propSchema)
+		}
+	}
+
+	// 4) (опційно) conditions.param та інші місця, де можуть бути {{...}}
+	// Сканимо raw рекурсивно, але пропускаємо response/response_type (це вихід, не вхід).
+	scanRawForVars(raw, props, requiredSet)
+}
+
+func scanRawForVars(v interface{}, props map[string]interface{}, requiredSet map[string]bool) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, vv := range t {
+			// пропускаємо вихідні мапінги
+			if k == "response" || k == "response_type" {
+				continue
+			}
+			// extra / extra_type / extra_headers вже оброблені типізовано, тут можна пропустити, щоб не затирати типи
+			if k == "extra" || k == "extra_type" || k == "extra_headers" {
+				continue
+			}
+			scanRawForVars(vv, props, requiredSet)
+		}
+	case []interface{}:
+		for _, it := range t {
+			scanRawForVars(it, props, requiredSet)
+		}
+	case string:
+		for _, vname := range extractVariablesFromString(t) {
+			addVar(props, requiredSet, vname, jsonSchemaForType("string"))
+		}
+	}
+}
+
+func addVar(props map[string]interface{}, requiredSet map[string]bool, varName string, schema map[string]interface{}) {
+	if varName == "" {
+		return
+	}
+	// merge: якщо вже є string, а новий більш конкретний — оновимо
+	if existing, ok := props[varName].(map[string]interface{}); ok {
+		et, _ := existing["type"].(string)
+		nt, _ := schema["type"].(string)
+		if et == "string" && nt != "" && nt != "string" {
+			props[varName] = schema
+		}
+	} else if _, ok := props[varName]; !ok {
+		props[varName] = schema
+	}
+	requiredSet[varName] = true
+}
+
+// === ВАЖЛИВО: нормалізація змінних ===
+// - {{content.actorId}} -> actorId
+// - {{token}} -> token
+// - env_var[...] / root.* / складні вирази -> ігноруємо
+var reVar = regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
+var reIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func extractVariablesFromString(s string) []string {
-	re := regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
-	m := re.FindAllStringSubmatch(s, -1)
+	m := reVar.FindAllStringSubmatch(s, -1)
 	out := make([]string, 0, len(m))
 	for _, mm := range m {
-		if len(mm) > 1 {
-			out = append(out, mm[1])
+		if len(mm) < 2 {
+			continue
 		}
+		expr := strings.TrimSpace(mm[1])
+
+		// content.xxx -> xxx
+		if strings.HasPrefix(expr, "content.") {
+			cand := strings.TrimSpace(strings.TrimPrefix(expr, "content."))
+			if reIdent.MatchString(cand) {
+				out = append(out, cand)
+			}
+			continue
+		}
+
+		// простий ident -> беремо
+		if reIdent.MatchString(expr) {
+			out = append(out, expr)
+			continue
+		}
+
+		// решту (env_var[@...], root.node_id, і т.п.) — не додаємо
 	}
 	return out
 }
-
 
 func jsonSchemaForType(t string) map[string]interface{} {
 	switch t {
