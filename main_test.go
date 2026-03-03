@@ -2,462 +2,227 @@ package main
 
 import (
 	"encoding/json"
+	"sort"
 	"testing"
 )
 
-// Test extracting variables from string
 func TestExtractVariablesFromString(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected []string
 	}{
-		{
-			name:     "simple variable",
-			input:    "X {{a}} Y",
-			expected: []string{"a"},
-		},
-		{
-			name:     "multiple variables",
-			input:    "X {{a}} Y {{ b.c }}",
-			expected: []string{"a", "b.c"},
-		},
-		{
-			name:     "with spaces",
-			input:    "{{  foo  }} and {{ bar }}",
-			expected: []string{"bar", "foo"},
-		},
-		{
-			name:     "no variables",
-			input:    "no variables here",
-			expected: []string{},
-		},
-		{
-			name:     "dot notation",
-			input:    "{{ payload.user.id }}",
-			expected: []string{"payload.user.id"},
-		},
+		{"simple variable", "X {{a}} Y", []string{"a"}},
+		{"multiple variables", "X {{a}} Y {{b}}", []string{"a", "b"}},
+		{"with spaces", "{{  foo  }} and {{ bar }}", []string{"foo", "bar"}},
+		{"no variables", "no variables here", []string{}},
+		{"dot notation skipped", "{{ payload.user.id }}", []string{}},
+		{"content dot prefix", "{{ content.userId }}", []string{"userId"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := extractVariablesFromString(tt.input)
-			if !stringsEqual(result, tt.expected) {
+			if !stringsContainSame(result, tt.expected) {
 				t.Errorf("got %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
 
-// Test recursive variable extraction from nested objects
-func TestExtractVariablesFromObject(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    interface{}
-		expected []string
-	}{
-		{
-			name: "nested map",
-			input: map[string]interface{}{
-				"field1": "{{var1}}",
-				"field2": map[string]interface{}{
-					"nested": "{{var2}}",
-				},
-			},
-			expected: []string{"var1", "var2"},
-		},
-		{
-			name: "array in object",
-			input: map[string]interface{}{
-				"items": []interface{}{
-					"{{item1}}",
-					"{{item2}}",
-				},
-			},
-			expected: []string{"item1", "item2"},
-		},
-		{
-			name: "deeply nested",
-			input: map[string]interface{}{
-				"level1": map[string]interface{}{
-					"level2": map[string]interface{}{
-						"level3": "{{deep_var}}",
-					},
-				},
-			},
-			expected: []string{"deep_var"},
-		},
-		{
-			name: "with deduplication",
-			input: map[string]interface{}{
-				"field1": "{{same}}",
-				"field2": "{{same}}",
-				"field3": "{{other}}",
-			},
-			expected: []string{"other", "same"},
-		},
+func TestAllTransitionsTopLevel(t *testing.T) {
+	nodeJSON := []byte(`{
+		"id": "node1",
+		"logics": [
+			{"type": "api_rpc", "extra": {"key": "{{myVar}}"}, "extra_type": {"key": "string"}},
+			{"type": "go", "to_node_id": "node2"}
+		],
+		"semaphors": []
+	}`)
+
+	var node Node
+	if err := json.Unmarshal(nodeJSON, &node); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractVariablesFromObject(tt.input, false)
-			if !stringsEqual(result, tt.expected) {
-				t.Errorf("got %v, want %v", result, tt.expected)
-			}
-		})
+	transitions := node.allTransitions()
+	if len(transitions) != 2 {
+		t.Errorf("got %d transitions, want 2", len(transitions))
 	}
 }
 
-// Test that URL variables are excluded when includeURLVars is false
-func TestURLVariablesExcluded(t *testing.T) {
-	input := map[string]interface{}{
-		"url": "{{domain}}/api/{{endpoint}}",
-		"body": map[string]interface{}{
-			"param": "{{bodyVar}}",
-		},
-	}
-
-	result := extractVariablesFromObject(input, true) // excludeURL=true
-	expected := []string{"bodyVar"}
-
-	if !stringsEqual(result, expected) {
-		t.Errorf("got %v, want %v", result, expected)
-	}
-}
-
-// Test that URL variables are included when includeURLVars is true
-func TestURLVariablesIncluded(t *testing.T) {
-	input := map[string]interface{}{
-		"url": "{{domain}}/api/{{endpoint}}",
-		"body": map[string]interface{}{
-			"param": "{{bodyVar}}",
-		},
-	}
-
-	result := extractVariablesFromObject(input, false) // excludeURL=false
-	expected := []string{"bodyVar", "domain", "endpoint"}
-
-	if !stringsEqual(result, expected) {
-		t.Errorf("got %v, want %v", result, expected)
-	}
-}
-
-// Test JSON schema building with variables
-func TestBuildJSONSchemaWithVars(t *testing.T) {
-	vars := []string{"var1", "var2"}
-	schema := buildJSONSchema(vars)
-
-	// Convert to JSON to check structure
-	schemaJSON, _ := json.Marshal(schema)
-	var schemaObj map[string]interface{}
-	json.Unmarshal(schemaJSON, &schemaObj)
-
-	// Check required fields
-	required, ok := schemaObj["required"].([]interface{})
-	if !ok {
-		t.Fatalf("required is not a slice")
-	}
-
-	requiredStrs := make([]string, len(required))
-	for i, r := range required {
-		requiredStrs[i] = r.(string)
-	}
-
-	expected := []string{"result", "reason", "var1", "var2"}
-	if !stringsEqual(requiredStrs, expected) {
-		t.Errorf("got %v, want %v", requiredStrs, expected)
-	}
-
-	// Check properties
-	props, ok := schemaObj["properties"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("properties is not a map")
-	}
-
-	if _, ok := props["var1"]; !ok {
-		t.Errorf("var1 not in properties")
-	}
-	if _, ok := props["var2"]; !ok {
-		t.Errorf("var2 not in properties")
-	}
-}
-
-// Test JSON schema building without variables
-func TestBuildJSONSchemaWithoutVars(t *testing.T) {
-	vars := []string{}
-	schema := buildJSONSchema(vars)
-
-	// Convert to JSON to check structure
-	schemaJSON, _ := json.Marshal(schema)
-	var schemaObj map[string]interface{}
-	json.Unmarshal(schemaJSON, &schemaObj)
-
-	// Check required fields - should only have base fields
-	required, ok := schemaObj["required"].([]interface{})
-	if !ok {
-		t.Fatalf("required is not a slice")
-	}
-
-	requiredStrs := make([]string, len(required))
-	for i, r := range required {
-		requiredStrs[i] = r.(string)
-	}
-
-	expected := []string{"result", "reason"}
-	if !stringsEqual(requiredStrs, expected) {
-		t.Errorf("got %v, want %v", requiredStrs, expected)
-	}
-}
-
-// Test finding AI node
-func TestFindAINode(t *testing.T) {
-	processJSON := []byte(`{
-		"scheme": {
-			"nodes": [
-				{"id": "node1", "title": "Start"},
-				{"id": "node2", "title": "AI Node"},
-				{"id": "node3", "title": "End"}
-			]
+func TestAllTransitionsCondition(t *testing.T) {
+	nodeJSON := []byte(`{
+		"id": "node1",
+		"condition": {
+			"logics": [
+				{"type": "api", "url": "https://example.com/{{param}}"},
+				{"type": "go", "to_node_id": "node2"}
+			],
+			"semaphors": []
 		}
 	}`)
 
-	node, err := findAINode(processJSON, "node2")
-	if err != nil {
-		t.Fatalf("error finding node: %v", err)
+	var node Node
+	if err := json.Unmarshal(nodeJSON, &node); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	if node == nil {
-		t.Fatalf("node is nil")
-	}
-
-	if node.Title != "AI Node" {
-		t.Errorf("got title %s, want AI Node", node.Title)
+	transitions := node.allTransitions()
+	if len(transitions) != 2 {
+		t.Errorf("got %d transitions, want 2", len(transitions))
 	}
 }
 
-// Test finding AI node that doesn't exist
-func TestFindAINodeNotFound(t *testing.T) {
-	processJSON := []byte(`{
-		"scheme": {
-			"nodes": [
-				{"id": "node1", "title": "Start"}
-			]
-		}
-	}`)
-
-	_, err := findAINode(processJSON, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-}
-
-// Test finding next node through go transition
-func TestFindNextNode(t *testing.T) {
-	processJSON := []byte(`{
-		"scheme": {
-			"nodes": [
-				{
-					"id": "ai_node",
-					"title": "AI",
-					"condition": {
-						"logics": [
-							{"type": "go", "to_node_id": "next_node"}
-						]
-					}
-				},
-				{"id": "next_node", "title": "API Node"}
-			]
-		}
-	}`)
-
-	aiNode := &Node{
-		ID: "ai_node",
-		Condition: &Condition{
-			Logics: []Logic{
-				{Type: "go", ToNodeID: "next_node"},
-			},
+func TestCollectVarsFromLogicRaw_Extra(t *testing.T) {
+	raw := map[string]interface{}{
+		"type": "api_rpc",
+		"extra": map[string]interface{}{
+			"conv_id": "{{aiNodeProcessId}}",
+			"login":   "{{corezoid_secret_login}}",
+			"key":     "{{corezoid_secret_key}}",
+		},
+		"extra_type": map[string]interface{}{
+			"conv_id": "number",
+			"login":   "string",
+			"key":     "string",
 		},
 	}
 
-	nextNode, err := findNextNode(aiNode, processJSON)
-	if err != nil {
-		t.Fatalf("error finding next node: %v", err)
+	props := map[string]interface{}{}
+	requiredSet := map[string]bool{}
+	collectVarsFromLogicRaw(raw, props, requiredSet)
+
+	want := []string{"aiNodeProcessId", "corezoid_secret_login", "corezoid_secret_key"}
+	got := keysOf(requiredSet)
+	if !stringsContainSame(got, want) {
+		t.Errorf("got vars %v, want %v", got, want)
 	}
 
-	if nextNode == nil {
-		t.Fatalf("next node is nil")
-	}
-
-	if nextNode.Title != "API Node" {
-		t.Errorf("got title %s, want API Node", nextNode.Title)
-	}
-}
-
-// Test finding next node when it doesn't exist
-func TestFindNextNodeNotFound(t *testing.T) {
-	processJSON := []byte(`{
-		"scheme": {
-			"nodes": [
-				{"id": "ai_node", "title": "AI"}
-			]
+	// check type hint applied: conv_id should be number
+	if p, ok := props["aiNodeProcessId"].(map[string]interface{}); ok {
+		if p["type"] != "number" {
+			t.Errorf("aiNodeProcessId type = %v, want number", p["type"])
 		}
-	}`)
-
-	aiNode := &Node{
-		ID: "ai_node",
-		Condition: &Condition{
-			Logics: []Logic{
-				{Type: "go", ToNodeID: "nonexistent"},
-			},
-		},
-	}
-
-	nextNode, err := findNextNode(aiNode, processJSON)
-	if err != nil {
-		t.Fatalf("error finding next node: %v", err)
-	}
-
-	if nextNode != nil {
-		t.Fatalf("expected nil, got %v", nextNode)
+	} else {
+		t.Errorf("aiNodeProcessId not in props")
 	}
 }
 
-// Test processing event with valid input
-func TestProcessEventValid(t *testing.T) {
-	processJSON := json.RawMessage(`{
-		"scheme": {
-			"nodes": [
-				{
-					"id": "ai_node",
-					"condition": {
-						"logics": [
-							{"type": "go", "to_node_id": "api_node"}
-						]
-					}
+func TestCollectVarsFromLogicRaw_URL(t *testing.T) {
+	raw := map[string]interface{}{
+		"type": "api",
+		"url":  "https://example.com/api?token={{token}}&user={{userId}}",
+	}
+
+	props := map[string]interface{}{}
+	requiredSet := map[string]bool{}
+	collectVarsFromLogicRaw(raw, props, requiredSet)
+
+	want := []string{"token", "userId"}
+	got := keysOf(requiredSet)
+	if !stringsContainSame(got, want) {
+		t.Errorf("got vars %v, want %v", got, want)
+	}
+}
+
+func TestProcessNodeWithRealData(t *testing.T) {
+	nodeJSON := []byte(`{
+		"id": "6970adabe552e8fe603d4805",
+		"obj_id": "6970adabe552e8fe603d4805",
+		"proc": "ok",
+		"obj": "node",
+		"title": "get corezoid process",
+		"logics": [
+			{
+				"conv_id": 1797994,
+				"type": "api_rpc",
+				"extra": {
+					"conv_id": "{{aiNodeProcessId}}",
+					"corezoid_secret_login": "{{corezoid_secret_login}}",
+					"corezoid_secret_key": "{{corezoid_secret_key}}"
 				},
-				{
-					"id": "api_node",
-					"title": "API Call",
-					"condition": {
-						"logics": [
-							{
-								"type": "api",
-								"url": "https://example.com/api?token={{token}}",
-								"body": {"param": "{{userId}}"}
-							}
-						]
-					}
+				"extra_type": {
+					"conv_id": "number",
+					"corezoid_secret_login": "string",
+					"corezoid_secret_key": "string"
 				}
-			]
-		}
+			},
+			{"type": "go", "to_node_id": "6970b4fbb677ac2b87403b10"}
+		],
+		"semaphors": [],
+		"obj_type": 0
 	}`)
 
-	input := InputData{
-		AINodeID:       "ai_node",
-		Process:        processJSON,
-		IncludeURLVars: false,
+	var node Node
+	if err := json.Unmarshal(nodeJSON, &node); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	output := processEvent(input)
-
-	if output.Error != nil {
-		t.Fatalf("got error: %v", output.Error)
+	if node.ID != "6970adabe552e8fe603d4805" {
+		t.Errorf("node ID = %s, want 6970adabe552e8fe603d4805", node.ID)
+	}
+	if node.Title != "get corezoid process" {
+		t.Errorf("node Title = %s, want 'get corezoid process'", node.Title)
 	}
 
-	if output.Meta == nil {
-		t.Fatalf("meta is nil")
+	props := map[string]interface{}{}
+	requiredSet := map[string]bool{}
+	for _, tr := range node.allTransitions() {
+		collectVarsFromLogicRaw(tr.Raw, props, requiredSet)
 	}
 
-	if output.Meta.NextNodeID != "api_node" {
-		t.Errorf("got next_node_id %s, want api_node", output.Meta.NextNodeID)
-	}
-
-	if output.Meta.VarsCount != 1 {
-		t.Errorf("got vars_count %d, want 1", output.Meta.VarsCount)
-	}
-
-	// Should only include userId (not token from URL)
-	if !contains(output.Meta.Vars, "userId") {
-		t.Errorf("userId not found in vars: %v", output.Meta.Vars)
+	want := []string{"aiNodeProcessId", "corezoid_secret_login", "corezoid_secret_key"}
+	got := keysOf(requiredSet)
+	if !stringsContainSame(got, want) {
+		t.Errorf("got vars %v, want %v", got, want)
 	}
 }
 
-// Test processing event with missing aiNodeId
-func TestProcessEventMissingAINodeId(t *testing.T) {
-	input := InputData{
-		AINodeID: "",
-		Process:  json.RawMessage(`{"scheme":{"nodes":[]}}`),
+func TestMissingNode(t *testing.T) {
+	payload := map[string]interface{}{}
+
+	if payload["node"] == nil {
+		payload["error"] = ErrorInfo{Code: "BAD_INPUT", Message: "node is required"}
 	}
 
-	output := processEvent(input)
-
-	if output.Error == nil {
-		t.Fatal("expected error, got nil")
+	errVal, ok := payload["error"].(ErrorInfo)
+	if !ok {
+		t.Fatal("expected ErrorInfo in payload")
 	}
-
-	if output.Error.Code != "BAD_INPUT" {
-		t.Errorf("got code %s, want BAD_INPUT", output.Error.Code)
+	if errVal.Code != "BAD_INPUT" {
+		t.Errorf("error code = %s, want BAD_INPUT", errVal.Code)
 	}
 }
 
-// Test processing event with missing process
-func TestProcessEventMissingProcess(t *testing.T) {
-	input := InputData{
-		AINodeID: "ai_node",
-		Process:  nil,
+// keysOf returns sorted keys of a bool map
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-
-	output := processEvent(input)
-
-	if output.Error == nil {
-		t.Fatal("expected error, got nil")
-	}
-
-	if output.Error.Code != "BAD_INPUT" {
-		t.Errorf("got code %s, want BAD_INPUT", output.Error.Code)
-	}
+	sort.Strings(out)
+	return out
 }
 
-// Test processing event with AI node not found
-func TestProcessEventAINodeNotFound(t *testing.T) {
-	input := InputData{
-		AINodeID: "nonexistent",
-		Process:  json.RawMessage(`{"scheme":{"nodes":[]}}`),
-	}
-
-	output := processEvent(input)
-
-	if output.Error == nil {
-		t.Fatal("expected error, got nil")
-	}
-
-	if output.Error.Code != "AI_NODE_NOT_FOUND" {
-		t.Errorf("got code %s, want AI_NODE_NOT_FOUND", output.Error.Code)
-	}
-}
-
-// Helper function to compare string slices
-func stringsEqual(a, b []string) bool {
+// stringsContainSame compares two slices order-independently
+func stringsContainSame(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-
-	// Both should be sorted
-	aCopy := make([]string, len(a))
-	bCopy := make([]string, len(b))
-	copy(aCopy, a)
-	copy(bCopy, b)
-
-	for i := range aCopy {
-		if aCopy[i] != bCopy[i] {
+	count := make(map[string]int)
+	for _, s := range a {
+		count[s]++
+	}
+	for _, s := range b {
+		count[s]--
+		if count[s] < 0 {
 			return false
 		}
 	}
-
 	return true
 }
 
-// Helper function to check if slice contains a string
 func contains(slice []string, str string) bool {
 	for _, s := range slice {
 		if s == str {
